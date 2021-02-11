@@ -1,0 +1,10 @@
+__pycache__/
+data/
+paper_predictions/
+summary/
+log/
+model/
+predictions/
+experiments/
+env/
+*.log
