@@ -33,11 +33,56 @@ def random_hash_with_sign(y, n_buckets):
     for i in range(len(y)):
         counts[y_buckets[i]] += (y[i] * y_signs[i])
     return counts, y_buckets, y_signs
+
+
+
+
+# y = samples from a power law distribution 
+def estimate_zipf_param(y):
+
+    sort = np.argsort(y)
+    y_sorted = y[sort][::-1] / np.max(y)
+    x = np.asarray(range(0, len(y))) + 1
     
+    def ll(b):  
+        # power law function
+        probabilities = x**(-b)
+
+        # normalized
+        probabilities = probabilities/probabilities.sum()
+
+        # log likelihoood
+        lvector = np.log(probabilities)
+
+        # multiply the vector by frequencies
+        lvector = np.log(probabilities) * y_sorted
+
+        l = lvector.sum()
+
+        # we want to maximize log-likelihood or minimize (-1)*loglikelihood
+        return(-l)
+
+    start_param = 2
+    s_best = minimize(ll, [start_param])
+    return s_best.x 
+    
+
+def second_moment_estimate(y):
+    ''' 
+    computes an estimate of the raw second momement in a stream of data
+    '''
+    iters = 10 # simultates 10 sign hash functions 
+    est = 0
+    for i in range(iters):
+        y_signs = np.random.choice([-1, 1], size=len(y))
+        est += (np.inner(y_signs, y))**2 # inner product squared
+
+    return est / iters
+
 def space_needed_for_median_estimate(values, num_samples):
     # Space needed: 
     # U = universe of items = 2^32 (int)
-    # 64 registers (1 byte per register) for global HLL used to keep track of total number of distinct elements 
+    # 128 registers (1 byte per register) for global HLL used to keep track of total number of distinct elements 
     # 2 registers (1 byte per register) for each DE_j for j = 1 ... log U ==> 2 * 32 bytes
     # 8 bytes for UE_j for j = 1 ... log U ==> 8 * 32 bytes 
     # DE_j and UE_j are required *per sample* that we need ==> everything multiplied by num_samples 
@@ -108,6 +153,52 @@ def get_unique_element(values, distinct_element_estimate):
         unique = counters[j]
     
     return unique
+
+def space_needed_for_distinct_element_sum_estiamte(values, eps, n_reg=16):
+    
+    min_value = abs(np.min(values)) + 1 # avoid issues with taking negative log 
+    logbase = 1 + eps
+    exp = np.array([int(round(log(x + min_value, logbase))) for x in values]) # compute rounding of log(x) with base logbase
+  
+    # total space in bytes: number of "groupings" times the
+    # number of regiseters in HLL (assume 1 byte per register)
+    u = len(np.unique(exp))
+    space = u * n_reg  # space in bytes
+
+    return space
+
+def compute_distinct_element_sum_estimate(values, eps, n_reg=16):
+    ''' 
+    computes a sum of values in a stream; without double counting 
+    error is bounded by by eps if n_reg is chosen accordingly 
+    '''
+    
+    min_value = abs(np.min(values)) + 1 # avoid issues with taking negative log 
+
+    estimated_sum = 0
+    logbase = 1 + eps
+    exp = np.array([int(round(log(x+min_value, logbase))) for x in values]) # compute rounding of log(x) with base logbase
+    exp.sort() # sort the array lowest to highest 
+
+    i = 0
+    while i < len(exp):
+        n = (exp == exp[i]).sum() # count occurences of this element
+        hll_count = simulate_hyperloglog(n, n_reg) # compute hyperloglog estimate (simulated for n elements)
+        estimated_sum += (logbase ** exp[i]) * hll_count # add to the running sum
+
+        # move on to next highest value
+        k = i
+        while k < len(exp) and exp[k] == exp[i]:
+            k += 1
+        i = k
+
+
+    # total space in bytes: number of "groupings" times the
+    # number of regiseters in HLL (assume 1 byte per register)
+    u = len(np.unique(exp))
+    space = u * n_reg  # space in bytes
+
+    return estimated_sum, space
 
 def simulate_hyperloglog(n, m): 
     '''

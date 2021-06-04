@@ -7,7 +7,7 @@ import numpy as np
 
 from itertools import repeat
 from multiprocessing import Pool, set_start_method, get_context
-from sketches import count_min, count_sketch, median_sketch
+from sketches import count_min, count_sketch
 from experiment_constants import *
 
 # utils for parsing the dataset and results 
@@ -20,6 +20,7 @@ logger = logging.getLogger('learned_estimators_log')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger.propagate = False
 logger.addHandler(logging.FileHandler('experiments/eval.log', 'a'))
+
 
 def order_y_wkey(y, results, key, n_examples=0):
     logger.info('loading results from %s' % results)
@@ -43,6 +44,7 @@ def order_y_wkey_list(y, results_list, key):
 def load_dataset(dataset, model, key, perfect_oracle=False, is_aol=False, is_synth_zipfian=False, is_synth_pareto=False):
 
     if is_synth_zipfian:
+        logger.info("Loading synthetic Zipfian dataset...")
         N = 200000
         a = 2.5 # zipf param > 1
         data = np.random.zipf(a, N).flatten() + 1
@@ -57,6 +59,7 @@ def load_dataset(dataset, model, key, perfect_oracle=False, is_aol=False, is_syn
         return data, scores
 
     elif is_synth_pareto:
+        logger.info("Loading synthetic Pareto dataset...")
         N = 1000000
         a = 1 # pareto param > 0
         data = np.random.pareto(a, N).flatten() + 1
@@ -73,10 +76,11 @@ def load_dataset(dataset, model, key, perfect_oracle=False, is_aol=False, is_syn
 
 
     start_t = time.time()
-    logger.info("Loading dataset...")
     if is_aol:
-        x, y = get_data_aol_query_list(dataset)
+        logger.info("Loading AOL dataset...")
+        _, y = get_data_aol_query_list(dataset)
     else:
+        logger.info("Loading IP dataset...")
         _, y = get_data_str_with_ports_list(dataset)
     
     logger.info('Done loading datasets (took %.1f sec)' % (time.time() - start_t))
@@ -85,9 +89,6 @@ def load_dataset(dataset, model, key, perfect_oracle=False, is_aol=False, is_syn
     logger.info("Loading model...")
     data, oracle_scores = order_y_wkey_list(y, model, key)
 
-    # IP data is stored in log form
-    if not is_aol:
-        oracle_scores = np.exp(oracle_scores)
     logger.info('Done loading model (took %.1f sec)' % (time.time() - start_t))
 
     logger.info("///////////////////////////////////////////////////////////")

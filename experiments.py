@@ -10,7 +10,7 @@ import copy
 from halo import Halo
 from itertools import repeat
 from multiprocessing import Pool, set_start_method, get_context
-from sketches import count_min, count_sketch, median_sketch
+from sketches import count_min, count_sketch
 from sketch_common import space_needed_for_median_estimate, simulate_median_estimate, estimate_zipf_param, simulate_hyperloglog
 
 from dataset import load_dataset
@@ -33,10 +33,24 @@ is_sorted = lambda a: np.all(a[:-1] <= a[1:])
 
 
 ##################################################$
-# each algorithm variant used in the experiemnts #
+# each algorithm variant used in the experiments #
 ###################################################
-def run_count_sketch(y, space, sanity_check_space_bound):
 
+def run_count_min(y, space, sanity_check_space_bound):
+    n_buckets = int(space / COUNT_MIN_OPTIMAL_N_HASH)
+    n_hashes = COUNT_MIN_OPTIMAL_N_HASH
+    estimates = count_min(y, n_buckets, n_hashes)
+
+    if n_buckets * n_hashes > sanity_check_space_bound:
+        print("[sanity check failed] TOTAL SPACE (vanilla count min) = " + str(n_buckets * n_hashes) + " > " + str(sanity_check_space_bound))
+        exit(0)
+
+    logger.info("Count min space_used / space_allocated = " + str(n_buckets * n_hashes/ sanity_check_space_bound))
+
+
+    return estimates
+
+def run_count_sketch(y, space, sanity_check_space_bound):
     n_buckets = int(space / COUNT_SKETCH_OPTIMAL_N_HASH)
     n_hashes = COUNT_SKETCH_OPTIMAL_N_HASH
     estimates = count_sketch(y, n_buckets, n_hashes)
@@ -53,7 +67,6 @@ def run_count_sketch(y, space, sanity_check_space_bound):
 # 1) store cutoff_threshold items in a table and report their *exact* counts
 # 2) store all items beyond the threshold in a count sketch and report the sketch counts
 def run_cutoff_count_sketch(y, y_scores, y_test_scores, space_for_sketch, cutoff_threshold, sanity_check_space_bound): 
-
     if not is_sorted(y_scores[::-1]):
         print("scores not sorted; is everything ok?")
         exit(0)
@@ -91,7 +104,7 @@ def run_cutoff_count_sketch(y, y_scores, y_test_scores, space_for_sketch, cutoff
 # 2) for all other items, report their (normalized) predicted frequency 
 # use_exact_sum = True will not estimate the sum on the fly and instead compute the *exact* sum when normalizing predictions
 # use_median_as_prediction = True will output the median of all non-cutoff values as the prediction for non-cutoff items 
-def run_learned_predictions(y, y_scores, space, sanity_check_space_bound, is_perfect_oracle=False): 
+def run_cutoff_median_sketch(y, y_scores, space, sanity_check_space_bound, is_perfect_oracle=False): 
 
     if not is_sorted(y_scores[::-1]) and not is_perfect_oracle:
         print("scores not sorted; is everything ok?")
@@ -160,6 +173,8 @@ def experiment_comapre_loss(
     save_folder, 
     save_file):
 
+    true_counts = data.copy()
+
     # learned algo with cutoff 
     logger.info("Running learned count sketch")
 
@@ -169,24 +184,54 @@ def experiment_comapre_loss(
     cutoff_count_sketch_predictions_absolute_all = []
     cutoff_count_sketch_predictions_relative_all = []
     count_sketch_prediction_all = []
-    
+    count_min_prediction_all = []
+
     for trial in range(num_trials):
+
+        # vanilla count sketch
+        logger.info("Running vanilla count sketch on all parameters...")
+        spinner = Halo(text='Evaluating vanilla count sketch algorithm', spinner='dots')
+        spinner.start()
+        with get_context("spawn").Pool() as pool:
+            count_sketch_prediction = pool.starmap(
+                run_count_sketch, zip(repeat(data), space_allocations, space_allocations))
+            pool.close()
+            pool.join()
+
+        spinner.stop()
+
+        count_sketch_prediction_all.append(count_sketch_prediction)
+
+        # vanilla count min
+        logger.info("Running vanilla count min on all parameters...")
+        spinner.stop()
+        spinner = Halo(text='Evaluating vanilla count min algorithm', spinner='dots')
+        spinner.start()
+        with get_context("spawn").Pool() as pool:
+            count_min_prediction = pool.starmap(
+                run_count_min, zip(repeat(data), space_allocations, space_allocations))
+            pool.close()
+            pool.join()
+
+        spinner.stop()
+
+        count_min_prediction_all.append(count_min_prediction)
+
+        ########################################################
 
         algo_predictions = []
         cutoff_count_sketch_predictions_weighted = []
         cutoff_count_sketch_predictions_absolute = []
         cutoff_count_sketch_predictions_relative = []
-        count_sketch_prediction = []
 
         spinner = Halo(text='Evaluating learned predictions algorithm', spinner='dots')
         spinner.start()
-
 
         if algo_type == ALGO_TYPE_CUTOFF_MEDIAN:
             # learned algorithm with cutoff 
             with get_context("spawn").Pool() as pool:
                 algo_predictions = pool.starmap(
-                    run_learned_predictions, 
+                    run_cutoff_median_sketch, 
                     zip(repeat(data), 
                     repeat(oracle_scores), 
                     copy.deepcopy(space_allocations),
@@ -197,6 +242,7 @@ def experiment_comapre_loss(
         
         algo_predictions_all.append(algo_predictions)
 
+        ########################################################
 
         # vanilla sketch + cutoff 
         # NOTE: need to evaluate this with each cutoff threshold 
@@ -248,39 +294,26 @@ def experiment_comapre_loss(
                 zip(repeat(data), repeat(oracle_scores), repeat(test_oracle_scores), space_allocations_cutoff_relative, best_cutoff_thresh_count_sketch_relative, space_allocations))
             pool.close()
             pool.join()
-
-
-        # vanilla count sketch
-        logger.info("Running vanilla count sketch on all parameters...")
-        spinner.stop()
-        spinner = Halo(text='Evaluating vanilla count sketch algorithm', spinner='dots')
-        spinner.start()
-        with get_context("spawn").Pool() as pool:
-            count_sketch_prediction = pool.starmap(
-                run_count_sketch, zip(repeat(data), space_allocations, space_allocations))
-            pool.close()
-            pool.join()
-
         spinner.stop()
 
         cutoff_count_sketch_predictions_weighted_all.append(cutoff_count_sketch_predictions_weighted)
         cutoff_count_sketch_predictions_absolute_all.append(cutoff_count_sketch_predictions_absolute)
         cutoff_count_sketch_predictions_relative_all.append(cutoff_count_sketch_predictions_relative)
-        count_sketch_prediction_all.append(count_sketch_prediction)
+
 
     #################################################################
     # save all results to the folder
     #################################################################
     np.savez(os.path.join(save_folder, save_file),
         space_list=space_list,
-        true_values=data,
+        true_values=true_counts,
         oracle_predictions=oracle_scores,
         algo_predictions=algo_predictions_all,
         cutoff_count_sketch_predictions_weighted=cutoff_count_sketch_predictions_weighted_all,
         cutoff_count_sketch_predictions_absolute=cutoff_count_sketch_predictions_absolute_all,
         cutoff_count_sketch_predictions_relative=cutoff_count_sketch_predictions_relative_all,
-        count_sketch_predictions=count_sketch_prediction_all)
-
+        count_sketch_predictions=count_sketch_prediction_all,
+        count_min_predictions=count_min_prediction_all)
 
 def experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
     algo_type,
@@ -343,7 +376,7 @@ def experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
         # learned algorithm with cutoff 
         with get_context("spawn").Pool() as pool:
             algo_predictions_trial = pool.starmap(
-                run_learned_predictions, 
+                run_cutoff_median_sketch, 
                 zip(eval_data.copy(), 
                 eval_scores.copy(), 
                 repeat(space),
@@ -445,6 +478,17 @@ def experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
     count_sketch_weighted_error = count_sketch_abs_error * np.array(data) 
     spinner.stop()
 
+    # vanilla count min
+    spinner = Halo(text='Running vanilla count min...', spinner='dots')
+    spinner.start()
+    count_min_prediction = run_count_min(data, space, space)
+    spinner.stop()
+
+    count_min_abs_error = np.abs(np.array(count_min_prediction) - np.array(data)) 
+    count_min_rel_error = count_min_abs_error / np.array(data) 
+    count_min_weighted_error = count_min_abs_error * np.array(data) 
+    spinner.stop()
+
     #################################################################
     # save all results to the folder
     #################################################################
@@ -454,6 +498,9 @@ def experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
         count_sketch_abs_error=np.sum(count_sketch_abs_error),
         count_sketch_rel_error=np.sum(count_sketch_rel_error),
         count_sketch_weighted_error=np.sum(count_sketch_weighted_error),
+        count_min_abs_error=np.sum(count_min_abs_error),
+        count_min_rel_error=np.sum(count_min_rel_error),
+        count_min_weighted_error=np.sum(count_min_weighted_error),
         cutoff_abs_error=best_cutoff_absolute_eror_per_oracle_error,
         cutoff_rel_error=best_cutoff_relative_eror_per_oracle_error,
         cutoff_weighted_error=best_cutoff_weighted_eror_per_oracle_error,
@@ -463,6 +510,7 @@ def experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
         algo_abs_error_std=algo_std_absolute_error_per_oracle_error,
         algo_rel_error_std=algo_std_relative_error_per_oracle_error,
         algo_weighted_error_std=algo_std_weighted_error_per_oracle_error,
+        num_trials=n_trials,
     )
 
 
@@ -569,6 +617,7 @@ if __name__ == '__main__':
     argparser.add_argument("--learned_algo_type", type=str, required=True, help="learned algorithm variant THRESHOLD | PARITION")
     argparser.add_argument("--synth_zipfian", action='store_true', default=False)
     argparser.add_argument("--synth_pareto", action='store_true', default=False)
+    argparser.add_argument("--synth_space_frac", type=float, default=0.5, help="space fraction to use for synth experiment")
     argparser.add_argument("--run_cutoff_count_sketch", action='store_true', default=False)
     argparser.add_argument("--run_perfect_oracle_version", action='store_true', default=False)
     argparser.add_argument("--model_size", type=float, default=0.0, help="model size in MB")
@@ -582,18 +631,17 @@ if __name__ == '__main__':
     spinner = Halo(text='Loading datasets...', spinner='dots')
     spinner.start()
 
-    if not args.synth_zipfian and not args.synth_pareto:
-        # load the test dataset (needed for both validation and testing)
-        # specifically, we use the test_oracle_scores to find the score cutoff 
-        # value in the validation data (jus thte way the experiment code is setup)
-        test_data, test_oracle_scores = load_dataset(
-            args.test_dataset, 
-            args.model_test, 
-            'valid_output', # old models were trained with valid/test swapped 
-            args.run_perfect_oracle_version,
-            args.aol_data,
-            args.synth_zipfian,
-            args.synth_pareto)
+    # load the test dataset (needed for both validation and testing)
+    # specifically, we use the test_oracle_scores to find the score cutoff 
+    # value in the validation data (just the way the experiment code is setup)
+    test_data, test_oracle_scores = load_dataset(
+        args.test_dataset, 
+        args.model_test, 
+        'valid_output', # old models were trained with valid/test swapped 
+        args.run_perfect_oracle_version,
+        args.aol_data,
+        args.synth_zipfian,
+        args.synth_pareto)
 
     if args.find_optimal_params:
         space_alloc = np.zeros(len(args.space_list))
@@ -626,36 +674,17 @@ if __name__ == '__main__':
         valid_data, valid_oracle_scores = load_dataset(
             args.valid_dataset, 
             args.model_valid, 
-            'test_output', # old models were trained with valid/test swapped 
+            'test_output', # models in [Hsu et al.] were trained with valid/test swapped 
             args.run_perfect_oracle_version,
             args.aol_data,
             args.synth_zipfian,
             args.synth_pareto)
 
-
-        # TODO: figure out whether we need to load multiple param files
-        best_cutoff_thresh_count_sketch_weighted = []
-        best_cutoff_thresh_count_sketch_absolute = []
-        best_cutoff_thresh_count_sketch_relative = []
-        learned_optimal_params = args.optimal_params[0]
-        if len(args.optimal_params) > 1:
-            count_sketch_optimal_params = args.optimal_params[1]
-            data = np.load(count_sketch_optimal_params)
-            best_cutoff_thresh_count_sketch_weighted = np.array(data['best_cutoff_thresh_for_space_weighted'])
-            best_cutoff_thresh_count_sketch_absolute = np.array(data['best_cutoff_thresh_for_space_absolute'])
-            best_cutoff_thresh_count_sketch_relative = np.array(data['best_cutoff_thresh_for_space_relative'])
-
-        data = np.load(learned_optimal_params)
-        space_list = np.array(data['space_list'])
-
-        space_alloc = np.zeros(len(space_list))
-        for i, space in enumerate(space_list):
-            space_alloc[i] = int((space - args.model_size) * 1e6 / 4.0) # 4 bytes per bucket
-
         spinner.stop()
 
         if args.synth_zipfian or args.synth_pareto:
-            synth_sapce = (len(valid_data) * 2) * 0.5 / 4.0 # 50 percent space 
+            space_factor = args.synth_space_frac
+            synth_space = (len(valid_data) * 8) * space_factor / 4.0  
 
             # evaluate experiemnt with different errors for the oracle 
             if args.synth_zipfian:
@@ -665,30 +694,33 @@ if __name__ == '__main__':
 
             experiment_comapre_loss_vs_oracle_error_on_synthetic_data(
                 args.learned_algo_type,
-                synth_sapce,
+                synth_space,
                 valid_data, 
                 args.n_trials,
                 args.n_workers, 
                 args.save_folder, 
                 args.save_file + save_name)
 
-            # run regular experiments (with cutoff) for comparisons 
-            # experiment_comapre_loss(
-            #     args.learned_algo_type,
-            #     space_list,
-            #     valid_data, 
-            #     valid_oracle_scores,
-            #     valid_oracle_scores,
-            #     space_alloc,
-            #     best_cutoff_thresh_count_sketch_weighted,
-            #     best_cutoff_thresh_count_sketch_absolute,
-            #     best_cutoff_thresh_count_sketch_relative,
-            #     args.n_trials,
-            #     args.n_workers, 
-            #     args.save_folder, 
-            #     args.save_file)
-        
         else:
+            best_cutoff_thresh_count_sketch_weighted = []
+            best_cutoff_thresh_count_sketch_absolute = []
+            best_cutoff_thresh_count_sketch_relative = []
+            learned_optimal_params = args.optimal_params[0]
+            if len(args.optimal_params) > 1:
+                count_sketch_optimal_params = args.optimal_params[1]
+                data = np.load(count_sketch_optimal_params)
+                best_cutoff_thresh_count_sketch_weighted = np.array(data['best_cutoff_thresh_for_space_weighted'])
+                best_cutoff_thresh_count_sketch_absolute = np.array(data['best_cutoff_thresh_for_space_absolute'])
+                best_cutoff_thresh_count_sketch_relative = np.array(data['best_cutoff_thresh_for_space_relative'])
+
+            data = np.load(learned_optimal_params)
+            space_list = np.array(data['space_list'])
+
+            space_alloc = np.zeros(len(space_list))
+            for i, space in enumerate(space_list):
+                space_alloc[i] = int((space - args.model_size) * 1e6 / 4.0) # 4 bytes per bucket
+
+
             # run the experiment with the specified parameters
             experiment_comapre_loss(
                 args.learned_algo_type,
